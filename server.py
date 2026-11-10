@@ -1,30 +1,10 @@
-"""Bulletin board server (Parts 1 and 2) - a single self-contained file.
+"""
+Group: Will Horvath, Logan Heitkamp, Rohit Ramesh
 
-Usage:  python3 server.py [--host ADDRESS] [--port PORT]      (default port 5050)
+Server side we decided to create using python.
 
-Wire format
------------
-TCP only gives us an ordered stream of bytes, so every protocol message is one
-JSON object encoded as UTF-8 and terminated by a newline.  ``json.dumps`` always
-escapes newlines inside strings, so a raw newline only ever means "end of
-message".  See README.md for the full field-by-field protocol specification.
+This file will do all server side processes from tracking history for clients, get responses, send responses, miantain groups, group members, maintain messages, delete users from groups, notify users when group changes, also notify when messages are sent out.
 
-Concurrency design
-------------------
-* One *reader* thread per client reads requests from that client's socket.
-* One *writer* thread per client drains an outbound queue onto the socket.
-  Every send to a client (replies and broadcasts) is just ``queue.put``, so a
-  slow or dead client can never block a broadcast, and two threads can never
-  interleave bytes on the same socket.
-* All shared state (groups, members, messages) is guarded by one lock.
-  Replies are queued while that lock is held, which guarantees a client sees
-  events in the same order the server applied them.
-
-Boards
-------
-Group 0 is the public board used by Part 1 (name "public").  Groups 1-5 are the
-private boards offered to Part 2 clients.  Every board has its own member list,
-message list and message ID counter, so boards are fully isolated.
 """
 
 import argparse
@@ -35,7 +15,6 @@ import queue
 import re
 import socket
 import threading
-from collections import OrderedDict
 
 # ---------------------------------------------------------------------------
 # Protocol helpers
@@ -54,12 +33,8 @@ MAX_BODY_LEN = 8000
 
 
 class ProtocolError(Exception):
-    """Raised when incoming bytes cannot be turned into a protocol message.
-
-    ``fatal`` means the stream can no longer be trusted (e.g. a line longer
-    than MAX_LINE_BYTES) and the connection should be closed.
+    """This occurs when an incoming message cannot be understood
     """
-
     def __init__(self, reason, fatal=False):
         super().__init__(reason)
         self.reason = reason
@@ -67,63 +42,61 @@ class ProtocolError(Exception):
 
 
 def encode(message):
-    """Serialize a dict to one newline-terminated UTF-8 JSON line."""
+    """This creates a one line JSON message"""
     return (json.dumps(message, separators=(",", ":")) + "\n").encode(ENCODING)
 
 
 def decode(line):
-    """Parse one received line (bytes) into a dict."""
+    """this parses one line"""
     try:
         obj = json.loads(line.decode(ENCODING))
     except (UnicodeDecodeError, ValueError):
         raise ProtocolError("malformed JSON") from None
     if not isinstance(obj, dict):
-        raise ProtocolError("message must be a JSON object")
+        raise ProtocolError("The message Has to bee a JSON object!!!!!")
     return obj
 
 
 def read_message(rfile):
-    """Read the next message from a buffered binary file object.
-
-    Returns ``None`` when the peer has closed the connection.  Blank lines are
-    skipped.  Raises ProtocolError for undecodable or oversized lines.
+    """Read the next message from a file that we give it.
     """
     while True:
         line = rfile.readline(MAX_LINE_BYTES + 1)
         if not line:
             return None
         if len(line) > MAX_LINE_BYTES and not line.endswith(b"\n"):
-            raise ProtocolError("message too long", fatal=True)
+            raise ProtocolError("message tooooooo long", fatal=True)
         if line.strip():
             return decode(line)
 
 
 def ok_response(cmd, **fields):
-    """Build a successful response to request type ``cmd``."""
+    """Build a successful response to a request type"""
     return {"type": "response", "cmd": cmd, "status": "ok", **fields}
 
 
 def error_response(cmd, reason, **fields):
-    """Build an error response to request type ``cmd``."""
+    """Build an error response to a request type"""
     return {"type": "response", "cmd": cmd, "status": "error",
             "reason": reason, **fields}
 
 
 def notification(event, **fields):
-    """Build an unsolicited server notification."""
+    """Build a server noti for the client side"""
     return {"type": "notify", "event": event, **fields}
 
 
-# ---- server ----
+"""Server Code Starts Here"""
+
 
 log = logging.getLogger("bulletin.server")
 
-PRIVATE_GROUP_NAMES = ["general", "sports", "music", "tech", "games"]  # ids 1..5
+PRIVATE_GROUP_NAMES = ["school", "sports", "music", "entertainment", "gaming"]  
 USERNAME_RE = re.compile(r"[A-Za-z0-9_.\-]{1,%d}" % MAX_USERNAME_LEN)
-
+""" The above is what limits usernames to only letters and numbers """
 
 class Message:
-    """A single posted message."""
+    """This is a message getting posted"""
 
     def __init__(self, message_id, sender, date, subject, body):
         self.id = message_id
@@ -133,23 +106,22 @@ class Message:
         self.body = body
 
     def header(self):
-        """Fields shown in listings: ID, sender, post date, subject."""
+        """ID, sender, post date, subject are all of the fields we wantted to send"""
         return {"id": self.id, "sender": self.sender,
                 "date": self.date, "subject": self.subject}
 
     def full(self):
-        """Header plus the message body (returned when a message is requested)."""
+        """The entire message. Header AND the message body """
         return {**self.header(), "body": self.body}
 
 
 class Group:
     """One message board with its own members and messages."""
-
     def __init__(self, group_id, name):
         self.id = group_id
         self.name = name
-        self.members = OrderedDict()   # ClientHandler -> username (join order)
-        self.messages = []             # Message objects; message id == index + 1
+        self.members = {}              
+        self.messages = []          
 
     def username_taken(self, username):
         wanted = username.lower()
@@ -160,20 +132,20 @@ class Group:
 
 
 class ClientHandler(threading.Thread):
-    """Serves one connected client (reader thread + a helper writer thread)."""
+    """This is what a client would use, and this allows each specfic client to each use one thread. So the server spins up one thread per client to listen for requests."""
 
-    def __init__(self, server, sock, address):
+    def __init__(self, server, socket, address):
         super().__init__(daemon=True, name="client-%s:%s" % address[:2])
         self.server = server
-        self.sock = sock
+        self.socket = socket
         self.label = "%s:%s" % address[:2]
         self.outbox = queue.Queue()
-        self.memberships = {}        # group id -> username (guarded by server.lock)
-        self.first_visible = {}      # group id -> lowest message id this member may read
-        self.disconnected = False    # guarded by server.lock
+        self.memberships = {}       
+        self.first_visible = {}     
+        self.disconnected = False   
 
     def send(self, message):
-        """Queue a message for this client (never blocks).  None closes it."""
+        """Queue a message for this client and make sure that nothing stops it from sending, so it will wait until it can send"""
         self.outbox.put(message)
 
     def _writer(self):
@@ -182,11 +154,11 @@ class ClientHandler(threading.Thread):
                 message = self.outbox.get()
                 if message is None:
                     break
-                self.sock.sendall(encode(message))
+                self.socket.sendall(encode(message))
         except OSError:
-            pass          # peer vanished; the reader thread will notice and clean up
+            pass
         finally:
-            for action in (lambda: self.sock.shutdown(socket.SHUT_RDWR), self.sock.close):
+            for action in (lambda: self.socket.shutdown(socket.SHUT_RDWR), self.socket.close):
                 try:
                     action()
                 except OSError:
@@ -194,7 +166,7 @@ class ClientHandler(threading.Thread):
 
     def run(self):
         threading.Thread(target=self._writer, daemon=True).start()
-        rfile = self.sock.makefile("rb")
+        rfile = self.socket.makefile("rb")
         try:
             self.send(self.server.welcome_message())
             while True:
@@ -205,12 +177,12 @@ class ClientHandler(threading.Thread):
                     if exc.fatal:
                         break
                     continue
-                if request is None:       # client closed the connection
+                if request is None:
                     break
                 if self.server.handle_request(self, request):
-                    break                 # client sent "exit"
+                    break
         except OSError:
-            pass                          # connection reset etc.
+            pass
         finally:
             self.server.disconnect(self)
             try:
@@ -220,14 +192,14 @@ class ClientHandler(threading.Thread):
 
 
 class BulletinServer:
-    """Listens for clients and implements all bulletin board commands."""
+    """Listens for clients and implements all bulletin board commands, this would give all these commands to clients when requested. You can also notice the group is being added in here and is just inserting at the index + 1 when needed"""
 
     def __init__(self, host="0.0.0.0", port=DEFAULT_PORT):
         self.host = host
         self.port = port
         self.lock = threading.RLock()
-        self.groups = OrderedDict()       # id -> Group
-        self.groups_by_name = {}          # lowercase name -> Group
+        self.groups = {}       
+        self.groups_by_name = {}  
         self._add_group(0, PUBLIC_GROUP)
         for number, name in enumerate(PRIVATE_GROUP_NAMES, start=1):
             self._add_group(number, name)
@@ -245,7 +217,7 @@ class BulletinServer:
             "exit": self._cmd_exit,
         }
 
-    # ---- setup / lifecycle -------------------------------------------------
+    #This is where we will setup these 
 
     def _add_group(self, group_id, name):
         group = Group(group_id, name)
@@ -253,13 +225,13 @@ class BulletinServer:
         self.groups_by_name[name.lower()] = group
 
     def start(self):
-        """Bind, listen and start accepting clients in a background thread."""
+        """Listen and start accepting clients in a background thread."""
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((self.host, self.port))
         listener.listen(50)
-        listener.settimeout(0.5)          # lets the accept loop notice stop()
-        self.port = listener.getsockname()[1]   # resolves port 0 for tests
+        listener.settimeout(0.5)
+        self.port = listener.getsockname()[1]
         self._listener = listener
         self._accept_thread = threading.Thread(
             target=self._accept_loop, daemon=True, name="accept")
@@ -302,15 +274,14 @@ class BulletinServer:
             log.info("Client connected: %s", handler.label)
             handler.start()
 
-    # ---- helpers (call with self.lock held unless noted) -------------------
-
+    
     def welcome_message(self):
         with self.lock:
             return {"type": "welcome", "public_group": PUBLIC_GROUP,
                     "groups": [g.info() for g in self.groups.values() if g.id != 0]}
 
     def resolve_group(self, ref):
-        """Find a group by numeric id or (case-insensitive) name."""
+        """Find a group by numeric id or name of group"""
         if isinstance(ref, bool):
             return None
         if isinstance(ref, int):
@@ -328,10 +299,7 @@ class BulletinServer:
                 member.send(notification)
 
     def _member_context(self, handler, request, cmd):
-        """Resolve the group and verify the sender joined it.
-
-        Returns (group, username, error_reply); error_reply is None on success.
-        """
+        """This will check if a user is a member of the group before they can send a message. It also returns the group and username and the error if there is one but no error if none obviously."""
         group = self.resolve_group(request.get("group", PUBLIC_GROUP))
         if group is None:
             return None, None, error_response(cmd, "unknown group")
@@ -342,7 +310,7 @@ class BulletinServer:
         return group, username, None
 
     def disconnect(self, handler):
-        """Remove a client from every group and close its connection (idempotent)."""
+        """Remove a client from every group and close its connection, this is what happens when a client ends the connection and disconnects."""
         with self.lock:
             if handler.disconnected:
                 return
@@ -355,13 +323,12 @@ class BulletinServer:
                     "user_left", group=group.name, user=username), exclude=handler)
             handler.memberships.clear()
             handler.first_visible.clear()
-            handler.send(None)           # writer thread flushes, then closes the socket
+            handler.send(None)      
         log.info("Client disconnected: %s", handler.label)
 
-    # ---- request dispatch --------------------------------------------------
 
     def handle_request(self, handler, request):
-        """Process one request.  Returns True if the connection should close."""
+        """Process one request, returnss True if the connection should close"""
         cmd = request.get("type")
         if not isinstance(cmd, str) or cmd not in self._commands:
             handler.send(error_response(str(cmd)[:40], "unknown command"))
@@ -375,7 +342,6 @@ class BulletinServer:
             handler.send(reply)
         return cmd == "exit"
 
-    # ---- commands ----------------------------------------------------------
 
     def _cmd_join(self, handler, request):
         group = self.resolve_group(request.get("group", PUBLIC_GROUP))
@@ -397,8 +363,7 @@ class BulletinServer:
         handler.memberships[group.id] = username
         self._notify(group, notification(
             "user_joined", group=group.name, user=username), exclude=handler)
-        # A new member may read only the last HISTORY_ON_JOIN messages that already
-        # existed (the history sent below) plus everything posted after joining.
+        # A new member, so someone who just joined, they can only read the last HISTORY_ON_JOIN messages that already existed (the history sent below) plus everything posted after joining.
         first_visible = max(1, len(group.messages) - HISTORY_ON_JOIN + 1)
         handler.first_visible[group.id] = first_visible
         history = [m.header() for m in group.messages[first_visible - 1:]]
