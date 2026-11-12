@@ -3,7 +3,9 @@ Group: Will Horvath, Logan Heitkamp, Rohit Ramesh
 
 Server side we decided to create using python.
 
-This file will do all server side processes from tracking history for clients, get responses, send responses, miantain groups, group members, maintain messages, delete users from groups, notify users when group changes, also notify when messages are sent out.
+This file will do all server side processes from tracking history for clients, get responses, send responses, miantain
+groups, group members, maintain messages, delete users from groups, notify users when group changes, also notify when
+messages are sent out.
 
 """
 

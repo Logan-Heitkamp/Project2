@@ -3,7 +3,6 @@
 #   make client      start the command-line client
 #   make gui         start the tkinter GUI client
 #   make clean       remove __pycache__ folders
-# Override defaults with e.g.:  make client HOST=192.168.1.20 PORT=6000
 
 PYTHON ?= python3
 HOST   ?= 127.0.0.1
